@@ -1,0 +1,8 @@
+JE_ID,PostedAt,Entity,Branch,Account,Amount,Description
+JE-0918,2026-09-29 16:02,US,RIV,6400,6120.33,Fuel accrual – Sept deliveries
+JE-0921,2026-09-29 17:40,US,OAK,5100,-2210.00,Reclass billable labor to job 2087
+JE-0925,2026-09-30 09:15,US,PIN,6500,845.10,Shop supplies – card purchases
+JE-0927,2026-09-30 11:48,CA,LKS,7400-FUEL,3302.00,Fuel – CAD
+JE-0931,2026-09-30 22:14,US,RIV,6150,18450.00,"Accrual – outside hydraulic cylinder repair, invoice pending"
+JE-0933,2026-09-30 23:05,US,OAK,6300,1975.40,Fluids accrual
+JE-0940,2026-10-02 10:20,US,PIN,6100,-640.00,Vendor credit – bearing return
