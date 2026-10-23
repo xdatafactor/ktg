@@ -30,11 +30,13 @@ OUT.mkdir(exist_ok=True)
 # ----------------------------------------------------------------------------------------------
 # Finance rules as configuration (owned by Finance; see design memo)
 # ----------------------------------------------------------------------------------------------
-RM_GROUP_ACCOUNTS = {"6100", "6150", "6200"}                      # Rule 1
+RM_GROUP_ACCOUNTS = {"6100", "6150", "6200", "6300"}              # Rule 1 (6300 Fluids & lubricants added by Finance)
+LEGACY_RM_GROUP_ACCOUNTS = RM_GROUP_ACCOUNTS - {"6300"}            # Accounting's close total still uses the old definition
 CAPEX_OPERATIONS = {"75", "100"}                                  # Rule 2
 PERIOD_START, PERIOD_END = pd.Timestamp("2026-07-01"), pd.Timestamp("2026-09-30")  # Rule 3
 ELM_CLOSE = pd.Timestamp("2026-07-31")                            # Rule 4
-LKS_RM_PATTERN = r"^73\d\d-RM"                                     # Rule 6
+LKS_LEGACY_RM_PATTERN = r"^73\d\d-RM"                              # Rule 6 (original)
+LKS_RM_PATTERN = r"^(?:73\d\d-RM|7500-FLUID)"                      # Rule 6 + 7500-FLUID (Lakeshore local account mapped to group 6300)
 BRANCH_ALIASES = {"RIV": "RIV", "RIVERTON": "RIV", "OAK": "OAK", "OAKDALE": "OAK",
                   "PIN": "PIN", "PINECREST": "PIN", "ELM": "ELM", "ELMWOOD": "ELM"}
 ACCOUNTING_TOTAL = Decimal("14120360.57")
@@ -131,15 +133,15 @@ log("Lines dated outside Q3 (20-30 Jun from the 27-Jun export; 1-3 Oct from the 
 
 # 1f. Non-R&M accounts
 nonrm = a[a["in_q3"] & ~a["is_rm_acct"]]
-log("Lines on non-R&M group accounts (5100 billable labor, 6300 fluids, 6400 fuel, 6500 shop supplies)",
+log("Lines on non-R&M group accounts (5100 billable labor, 6400 fuel, 6500 shop supplies)",
     "Acct value_counts after cleaning",
-    "Rule 1: only 6100/6150/6200 are R&M",
+    "Rule 1: only 6100/6150/6200/6300 are R&M (6300 Fluids & lubricants reclassified to R&M by Finance)",
     len(nonrm), nonrm["ExtCost"].sum(), "ERP-A")
 
 # 1g. Customer number on R&M lines -- informational, no exclusion
 cust = a[a["in_q3"] & a["is_rm_acct"] & ~a["capex"] & (a["CustNum"].str.strip() != "")]
 log("R&M-account lines carrying a customer number (C1044/C2087/C3310) - could be mistaken for billable work",
-    "Non-blank CustNum on 6100/6150/6200 lines",
+    "Non-blank CustNum on 6100/6150/6200/6300 lines",
     "Rule 1: account decides, line kept in R&M (no change)",
     len(cust), 0.0, "ERP-A")
 
@@ -181,6 +183,7 @@ txt_amt = b["AmountCAD"].str.contains(",", na=False)
 b["AmountCAD"] = b["AmountCAD"].str.replace(",", "", regex=False).astype(float)
 b["PostingDate"] = pd.to_datetime(b["PostingDate"], format="%d/%m/%Y")  # DD/MM (day part up to 31)
 b["is_rm"] = b["LocalAccount"].str.match(LKS_RM_PATTERN)
+b["is_rm_legacy"] = b["LocalAccount"].str.match(LKS_LEGACY_RM_PATTERN)
 b["in_q3"] = b["PostingDate"].between(PERIOD_START, PERIOD_END)
 
 fx = pd.read_csv(DATA / "fx_cad_usd.csv", dtype={"Month": str})
@@ -228,9 +231,9 @@ log(f"Lakeshore R&M lines posted outside Q3 (late Jun, Oct) - CAD {oop_b.AmountC
     "Rule 3: exclude (USD shown as 0 because no Q3 translation applies)",
     len(oop_b), 0.0, "ERP-B")
 nonrm_b = detail[~detail.is_rm & detail.in_q3]
-log("Lakeshore non-R&M accounts (5100-LAB, 7400-FUEL, 7500-FLUID)",
+log("Lakeshore non-R&M accounts (5100-LAB, 7400-FUEL)",
     "LocalAccount vs 73xx-RM pattern",
-    "Rule 1/6: exclude",
+    "Rule 1/6: exclude (7500-FLUID is R&M: maps to group 6300)",
     len(nonrm_b), lks_usd(nonrm_b), "ERP-B")
 
 b.to_sql("stg_erp_b", engine, if_exists="replace", index=False)
@@ -262,14 +265,25 @@ print(f"Gap (Acct - Finance) : {ACCOUNTING_TOTAL - finance_total:,.2f}")
 # ----------------------------------------------------------------------------------------------
 je = pd.read_csv(DATA / "accounting_je_register_sep_close.csv", dtype={"Account": str})
 je["PostedAt"] = pd.to_datetime(je["PostedAt"])
-je["is_rm"] = je["Account"].isin(RM_GROUP_ACCOUNTS) | je["Account"].str.match(LKS_RM_PATTERN)
+# Accounting's close total (14,120,360.57) was built on the OLD R&M definition (no 6300 / 7500-FLUID),
+# so the JE test and the FX item are evaluated on that basis; the definition change is its own bridge item.
+je["is_rm"] = je["Account"].isin(LEGACY_RM_GROUP_ACCOUNTS) | je["Account"].str.match(LKS_LEGACY_RM_PATTERN)
 je["in_close"] = je["PostedAt"] <= pd.Timestamp("2026-09-30 23:59:59")
 je_rm_close = je[je.is_rm & je.in_close]                                   # -> JE-0931 only
 
-sep_cad = lks_cad_m["2026-09"]
+d_legacy_q3 = detail[detail.is_rm_legacy & detail.in_q3]
+lks_cad_legacy_m = d_legacy_q3.groupby(d_legacy_q3["PostingDate"].dt.strftime("%Y-%m"))["AmountCAD"].sum()
+sep_cad = lks_cad_legacy_m["2026-09"]
 fx_item = cents(sep_cad * fx_me["2026-09"]) - cents(sep_cad * fx_avg["2026-09"])
 
-bridge = [("Finance Q3 R&M (ERP data, README rules)", finance_total)]
+# 6300 definition change: ERP-A 6300 lines + Lakeshore 7500-FLUID (translated month total, then rounded)
+fluid_a = sum(cents(v) for v in fa[fa["Acct"] == "6300"].groupby(["Branch", "Month"])["ExtCost"].sum())
+fluid_lks = sum(cents(v * fx_avg[m]) for m, v in lks_cad_m.items()) \
+    - sum(cents(v * fx_avg[m]) for m, v in lks_cad_legacy_m.items())
+
+bridge = [("Finance Q3 R&M (ERP data, README rules, incl. 6300 Fluids & lubricants)", finance_total),
+          ("Less: 6300 Fluids & lubricants ERP-A lines (R&M per Finance, not in Accounting total)", -fluid_a),
+          ("Less: Lakeshore 7500-FLUID (group 6300) translated at avg rate (not in Accounting total)", -fluid_lks)]
 for r in je_rm_close.itertuples():
     bridge.append((f"{r.JE_ID} {r.Branch} {r.Account} manual JE: {r.Description}", cents(r.Amount)))
 bridge.append((f"LKS Sep-2026 translated at month-end {fx_me['2026-09']} instead of avg {fx_avg['2026-09']} "
